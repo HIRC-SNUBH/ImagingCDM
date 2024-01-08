@@ -1,0 +1,297 @@
+import os
+import psycopg2
+import pydicom
+
+def filepath_info(dir_path, conn):
+    total_size = 0  # Variable to store the size of all .dcm files in the folder
+    file_extension = "dcm"
+    unit_source_value = "byte"
+    unit_concept_id = 9470
+    file_name = os.path.basename(dir_path)
+
+    for root, _, files in os.walk(dir_path):
+        for file in files:
+            if file.endswith(".dcm"):
+                file_path = os.path.join(root, file)
+                total_size += os.path.getsize(file_path)  # Cumulative file size
+
+    cursor = conn.cursor()
+    # Insert information about that folder into the database only once
+    cursor.execute("""
+    INSERT INTO filepath (filepath_type_concept_id, filepath, file_name, file_extension, file_size, unit_concept_id, unit_source_value)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (None, dir_path, file_name, file_extension, total_size, unit_concept_id, unit_source_value))
+    conn.commit()
+
+def filepath_info_seires(dir_path, conn):
+    total_size = 0
+    file_extension = "dcm"
+    unit_source_value = "byte"
+    unit_concept_id = 9470
+    file_name = os.path.basename(dir_path)
+    series_instance_uid = None
+
+    for root, _, files in os.walk(dir_path):
+        for file in files:
+            if file.endswith(".dcm"):
+                file_path = os.path.join(root, file)
+                total_size += os.path.getsize(file_path)
+
+                if not series_instance_uid:
+                    dicom_data = pydicom.dcmread(file_path)
+                    series_instance_uid = dicom_data.SeriesInstanceUID
+
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO filepath (filepath_type_concept_id, filepath, file_name, file_extension, file_size, unit_concept_id, unit_source_value, ext_seriesuid)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """, (None, dir_path, file_name, file_extension, total_size, unit_concept_id, unit_source_value, series_instance_uid))
+    conn.commit()
+
+
+def is_leaf_directory(dirpath):
+    return not any(os.path.isdir(os.path.join(dirpath, sub)) for sub in os.listdir(dirpath))
+
+
+def read_dicom_info(file_path):
+    ds = pydicom.dcmread(file_path)
+    study_date = ds.get("StudyDate", None)
+    manufacturer_model_name = ds.get("ManufacturerModelName", None) #Manufacturer
+    modality = ds.get("Modality", None)
+    return study_date, manufacturer_model_name, modality
+
+def format_value(value):
+    """If the input value is a list, convert it to a string; otherwise, return the original value."""
+    if isinstance(value, list):
+        # Convert each item in the list to a string and concatenate it with commas
+        return ','.join(map(str, value))
+    else:
+        # If it is not a list, return the original value
+        return value
+
+
+def insert_to_db(dirpath, conn):
+    """Function to insert DICOM information into database"""
+    dicom_files = [f for f in os.listdir(dirpath) if f.lower().endswith(".dcm")]
+
+    if not dicom_files:
+        return
+
+    # Calculate number of series and DICOM files
+    unique_series = set()
+    for dicom_file in dicom_files:
+        ds = pydicom.dcmread(os.path.join(dirpath, dicom_file))
+        series_uid = ds.get("SeriesInstanceUID", None)
+        unique_series.add(series_uid)
+
+    number_of_series = len(unique_series)
+    number_of_instance = len(dicom_files)
+
+    try:
+        study_date, manufacturer_model_name, modality = read_dicom_info(os.path.join(dirpath, dicom_files[0]))
+
+        # Set modality_concept_id according to modality value
+        if modality == "CT":
+            modality_concept_id = 4300757
+        elif modality == "MR":
+            modality_concept_id = 4013636
+        elif modality == "CR":
+            modality_concept_id = 4056681
+        else:
+            modality_concept_id = None
+
+        cursor = conn.cursor()
+        folder_name_substring = os.path.basename(dirpath)
+        cursor.execute("""
+            INSERT INTO imaging_study (imaging_study_id, study_date, study_type_concept_id, manufacturer, modality_concept_id, modality_source_value, number_of_series, number_of_instance)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (folder_name_substring, study_date, 32882, manufacturer_model_name, modality_concept_id, modality, number_of_series, number_of_instance))
+
+        conn.commit()
+
+    except Exception as e:
+        print(f"Error while inserting data into the database: {e}")
+        conn.rollback()
+
+
+def extract_series_info(file_path, conn):
+    ds = pydicom.dcmread(file_path)
+    series_uid = ds.get("SeriesInstanceUID", None)
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT imaging_series_id FROM imaging_series WHERE unique_series_id=%s",
+                       (series_uid,))
+
+        if cursor.fetchone():
+            return None
+    except psycopg2.errors.InFailedSqlTransaction:
+        print("Rolling back due to a failed transaction.")
+        conn.rollback()
+
+    folder_name_substring = os.path.basename(dirpath)
+    series_files = [f for f in os.listdir(os.path.dirname(file_path)) if f.lower().endswith('.dcm')]
+    matching_files_count = sum(1 for f in series_files if
+                               pydicom.dcmread(os.path.join(os.path.dirname(file_path), f)).get("SeriesInstanceUID") == series_uid)
+
+    # keywords = ['BodyPartExamined', 'Laterality', 'NumberOfFrames', 'SeriesDescription', 'PatientPosition',
+    #             'SliceThickness', 'Rows', 'Columns', 'WindowCenter', 'WindowWidth', 'number_of_instance']
+
+    keywords = ['BodyPartExamined', 'ImageType', 'NumberOfFrames', 'SeriesDescription', 'PatientPosition',
+                'SliceThickness', 'Rows', 'Columns', 'WindowCenter', 'WindowWidth','number_of_instance']
+    values = [ds.get(keyword, None) for keyword in keywords[:-1]] + [matching_files_count]
+
+
+    series_data = []
+    for keyword, value in zip(keywords, values):
+        if value:
+            if keyword in ['Rows', 'Columns', 'SliceThickness', 'number_of_instance']:
+                entry = (series_uid, folder_name_substring, keyword, value, '', None)
+                series_data.append(entry)
+            elif keyword in ['PatientPosition', 'SeriesDescription','WindowCenter','WindowWidth']:
+                formatted_value_source_value = format_value(value)
+                entry = (series_uid, folder_name_substring, keyword, '', formatted_value_source_value, None)
+                series_data.append(entry)
+
+            elif keyword == 'BodyPartExamined':
+                if value.lower() == 'lung':
+                    entry = (series_uid,folder_name_substring, keyword, '', value, 4211614)
+                elif value.lower() == 'brain':
+                    entry = (series_uid, folder_name_substring, keyword, '', value, 40480925)
+                elif value.lower() == 'chest':
+                    entry = (series_uid, folder_name_substring, keyword, '', value, 4211641)
+                else:
+                    entry = (series_uid, folder_name_substring, keyword, '', value, None)
+                series_data.append(entry)
+
+            elif keyword == 'ImageType':
+                keyword = 'Laterality'
+                if isinstance(value, (list, tuple)) or hasattr(value, '__iter__'):
+                    value_str = ' '.join(map(str, value))
+                else:
+                    value_str = str(value)
+
+                lower_value = value_str.lower()
+                if 'axial' in lower_value:
+                    value = 'axial'
+                elif 'sagittal' in lower_value:
+                    value = 'sagittal'
+                elif 'coronal' in lower_value:
+                    value = 'coronal'
+                else:
+                    value = None
+
+                #If information about Laterality is found, add an entry and move on to the next keyword.
+                if value:
+                    entry = (series_uid, folder_name_substring, keyword, '', value, None)
+                    series_data.append(entry)
+                    continue
+
+    return series_data
+
+def insert_series_info(directory, conn):
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.lower().endswith('.dcm'):
+                file_path = os.path.join(root, file)
+                series_data = extract_series_info(file_path, conn)
+                if series_data:
+                    cursor = conn.cursor()
+                    for entry in series_data:
+                        try:
+                            #print("Inserting:", entry)
+                            cursor.execute("""
+                                INSERT INTO imaging_series (unique_series_id, imaging_study_id, series_source_value, value_as_number, value_source_value, value_as_concept_id)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                            """, entry)
+                            conn.commit()
+                        except Exception as e:
+                            print(f"Error inserting series data: {e}")
+
+main_folder = "test/"
+# Connect to the PostgreSQL database
+# Enter user sql connection information
+conn = psycopg2.connect(database=' ', user=' ', password=' ', host='localhost', port=' ')
+cursor = conn.cursor()
+
+# Check if tables already exist
+cursor.execute("SELECT to_regclass('imaging_study')")
+if not cursor.fetchone()[0]:
+    cursor.execute("""
+    CREATE TABLE imaging_study (
+        imaging_study_id TEXT PRIMARY KEY,
+        person_id INT,
+        note_id INT,
+        procedure_occurrence_id INT,
+        study_date DATE,
+        study_datetime TEXT,
+        filepath_id INT,
+        study_type_concept_id INT,
+        manufacturer TEXT,
+        modality_concept_id INT,
+        modality_source_value TEXT,
+        number_of_series INT,
+        number_of_instance INT
+    )
+    """)
+    conn.commit()
+
+cursor.execute("SELECT to_regclass('imaging_series')")
+if not cursor.fetchone()[0]:
+    cursor.execute("""
+    CREATE TABLE imaging_series (
+        imaging_series_id SERIAL PRIMARY KEY,
+        person_id INT,
+        filepath_id INT,
+        imaging_study_id TEXT,
+        unique_series_id TEXT,
+        series_concept_id INT,
+        series_source_value TEXT,
+        value_as_number TEXT,
+        value_as_concept_id INT,
+        value_source_value TEXT,
+        unit_concept_id INT,
+        unit_source_value TEXT
+    )
+    """)
+    conn.commit()
+
+cursor.execute("SELECT to_regclass('filepath')")
+if not cursor.fetchone()[0]:
+    cursor.execute("""
+    CREATE TABLE filepath (
+        filepath_id SERIAL PRIMARY KEY,
+        filepath_type_concept_id INT,
+        filepath TEXT,
+        file_name TEXT,
+        file_extension TEXT,
+        file_size TEXT,
+        unit_concept_id INT,
+        unit_source_value TEXT,
+        ext_seriesuid TEXT
+    )
+    """)
+    conn.commit()
+
+
+# When there is only one series in one folder
+for dirpath, _, _ in os.walk(main_folder):
+    if is_leaf_directory(dirpath):
+        insert_to_db(dirpath, conn)
+        insert_series_info(dirpath, conn)
+        print('imagingstudy and series_ok\n')
+        filepath_info_seires(dirpath, conn)
+        print(dirpath)
+
+
+# When there are multiple series in one study folder
+# for dirpath, _, _ in os.walk(main_folder):
+#     if is_leaf_directory(dirpath):
+#         insert_to_db(dirpath, conn)
+#         print('imagingstudy_ok\n')
+#         insert_series_info(dirpath, conn)
+#         filepath_info(dirpath, conn)
+#         filepath_info_seires(dirpath, conn)
+#         print(dirpath)
+
+conn.close()
