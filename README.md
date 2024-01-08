@@ -18,6 +18,7 @@ The primary goal of this project is to provide a seamless, automated pipeline fo
 1. **Data Extraction**: The Python script reads DICOM files and extracts relevant data.
 2. **Data Transformation**: The extracted data is then mapped and transformed into the OMOP CDM format using a predefined schema.
 3. **Database Storage**: The OMOP CDM formatted data is loaded into a SQL database, ensuring data integrity and security.
+
 The DICOM images utilized in this project are sourced from the NSCLC-Radiomics dataset. This dataset can be accessed and downloaded from [The Cancer Imaging Archive's NSCLC-Radiomics page](https://www.cancerimagingarchive.net/collection/nsclc-radiomics/).
 
 # Usage
